@@ -155,6 +155,9 @@ struct Cli {
     /// Add a NIC, so that the VM can be accessed via SSH. Usually combined with a long timeout
     #[clap(long, action)]
     enable_debug_ssh: bool,
+    /// SSH port to use when enable_debug_ssh is set (default: 10021)
+    #[clap(long, default_value_t = 10021, action)]
+    ssh_port: u16,
     /// Add a NIC, so that the VM can be accessed via SSH. Usually combined with a long timeout
     #[clap(long, action)]
     enable_debug_slow_execution: Option<humantime::Duration>,
@@ -176,6 +179,15 @@ struct Cli {
     /// Respond to Bluetooth commands with dummy command complete frames
     #[clap(long, action)]
     bt_fake_cc: bool,
+    /// Add ramoops configuration (memory crash dump). Requires ramoops kernel support
+    #[clap(long, action)]
+    enable_ramoops: bool,
+    /// Path to shared directory for virtfs (9p filesystem sharing with guest)
+    #[clap(long, action)]
+    shared_dir: Option<PathBuf>,
+    /// Additional raw QEMU arguments to pass through
+    #[clap(long, action)]
+    qemu_args: Option<String>,
     /// Maximum length of randomly generated seeds
     #[clap(long, action, default_value = "80")]
     max_rand_seed_len: usize,
@@ -365,14 +377,14 @@ where
 
         let mut builder =
             QemuSystemBuilder::new(&cli.qemu, &cli.image, &cli.kernel, device.clone())
-                .cpu(1)
-                .memory(2)
+                .cpu(4)        // Match Syzkaller: 4 CPUs
+                .memory(4)     // Match Syzkaller: 4GB RAM
                 .kcov_mode(if let Some(duration) = cli.enable_debug_slow_execution {
                     QemuKcovMode::Debug(Some(*duration))
                 } else {
                     QemuKcovMode::Standard
                 })
-                .add_kernel_param("loglevel=8");
+                .add_kernel_param("loglevel=5");
 
         if cli.enable_qemu_logging {
             builder = builder.enable_qemu_logging();
@@ -386,11 +398,9 @@ where
             if cores.ids.len() != 1 {
                 error!("Can't enable SSH if running more than 1 VM in parallel");
             } else {
+                let ssh_fwd = format!("user,host=10.0.2.10,hostfwd=tcp:127.0.0.1:{}-:22", cli.ssh_port);
                 builder = builder
-                    .add_device_with_param(
-                        "net",
-                        "user,host=10.0.2.10,hostfwd=tcp:127.0.0.1:10021-:22",
-                    )
+                    .add_device_with_param("net", &ssh_fwd)
                     .add_device_with_param("net", "nic,model=e1000")
                     .enable_nic();
             }
@@ -406,6 +416,43 @@ where
 
         if cli.init_path.is_some() {
             builder = builder.use_init_pcap(PathBuf::from(cli.init_path.as_ref().unwrap()));
+        }
+
+        // Add ramoops configuration if enabled
+        if cli.enable_ramoops {
+            // Use shared_dir for ramoops path if specified, otherwise use default ./shared
+            let ramoops_path = if let Some(shared_path) = &cli.shared_dir {
+                format!("{}/ramoops.bin", shared_path.to_str().unwrap())
+            } else {
+                "./shared/ramoops.bin".to_string()
+            };
+            
+            builder = builder
+                .add_kernel_param("ramoops.mem_address=0x140000000")
+                .add_kernel_param("ramoops.mem_size=0x6400000")
+                .add_kernel_param("ramoops.record_size=0x100000")
+                .add_kernel_param("ramoops.console_size=0x2800000")
+                .add_kernel_param("ramoops.pmsg_size=0x1400000")
+                .add_device_with_param("object", &format!("memory-backend-file,id=ramoops_mem,size=0x6400000,mem-path={},share=on", ramoops_path))
+                .add_device_with_param("device", "pc-dimm,id=ramoops_dimm,memdev=ramoops_mem,addr=0x140000000")
+                .add_raw_qemu_args("-m 4096M,slots=1,maxmem=4196M");
+        }
+
+        // Add virtfs shared directory if specified
+        if let Some(shared_path) = &cli.shared_dir {
+            if !shared_path.exists() {
+                std::fs::create_dir_all(shared_path).expect("Failed to create shared directory");
+            }
+            builder = builder.add_device_with_param(
+                "virtfs",
+                &format!("local,id=shared_dev,path={},security_model=none,mount_tag=hostshare",
+                         shared_path.to_str().unwrap())
+            );
+        }
+
+        // Add custom QEMU arguments if provided
+        if let Some(qemu_args) = &cli.qemu_args {
+            builder = builder.add_raw_qemu_args(qemu_args);
         }
 
         Self {

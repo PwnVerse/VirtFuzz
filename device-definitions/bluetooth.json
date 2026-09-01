@@ -4,5 +4,5 @@
   "virtqueue_tx": 0,
   "virtqueue_rx": 1,
   "features": [],
-  "config": "000000FF"
+  "config": "000000FF00"
 }

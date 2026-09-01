@@ -148,6 +148,12 @@ fi
 if [ $DEBARCH == "riscv64" ]; then
     DEBOOTSTRAP_PARAMS="--keyring /usr/share/keyrings/debian-ports-archive-keyring.gpg --exclude firmware-atheros $DEBOOTSTRAP_PARAMS http://deb.debian.org/debian-ports"
 fi
+
+# Use archive URL for old releases (stretch, jessie, etc.)
+if [ "$RELEASE" == "stretch" ] || [ "$RELEASE" == "jessie" ] || [ "$RELEASE" == "wheezy" ]; then
+    DEBOOTSTRAP_PARAMS="$DEBOOTSTRAP_PARAMS http://archive.debian.org/debian"
+fi
+
 sudo --preserve-env=http_proxy,https_proxy,ftp_proxy,no_proxy debootstrap $DEBOOTSTRAP_PARAMS
 
 # 2. debootstrap stage: only necessary if target != host architecture

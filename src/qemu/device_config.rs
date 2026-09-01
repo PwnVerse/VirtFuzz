@@ -28,9 +28,9 @@ impl AsQEMUDevice for DeviceConfiguration {
             .unwrap_or_else(|_| panic!("Unable to write configuration to {:?}", config_path));
         let mut features = String::new();
         if !self.features.is_empty() {
-            features += &format!(",len-features={}", self.features.len());
-            for i in 0..self.features.len() {
-                features += &format!(",features[{}]={}", i, self.features[i]);
+            // QEMU DEFINE_PROP_ARRAY uses dot notation: features.0=0,features.1=1,features.2=2
+            for (i, f) in self.features.iter().enumerate() {
+                features += &format!(",features.{}={}", i, f);
             }
         }
 

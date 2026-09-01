@@ -13,10 +13,10 @@ if ! grep "ivshmem" drivers/staging/Kconfig; then
     git -c user.name='VirtFuzz' -c user.email='shuster@seemoo.tu-darmstadt.de' commit --no-gpg-sign --amend -m "$(git log --format=%B -n1)" -m "Add ivshmem to Kconfig"
 fi
 
-if ! grep "CONFIG_IVSHMEM" drivers/staging/Makefile; then
+if ! grep "Civers/staging/Makefile; then
     echo "Manually amending commit to include ivshmem device in drivers/staging/Makefile"
     echo 'obj-$(CONFIG_IVSHMEM)	+= ivshmem/' >> drivers/staging/Makefile;
-    git add drivers/staging/Makefile
+    git add drivers/staging/MakefileONFIG_IVSHMEM" dr
     git -c user.name='VirtFuzz' -c user.email='shuster@seemoo.tu-darmstadt.de' commit --no-gpg-sign --amend -m "$(git log --format=%B -n1)" -m "Add ivshmem to Makefile"
 fi
 

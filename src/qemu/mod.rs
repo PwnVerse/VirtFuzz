@@ -77,7 +77,7 @@ pub struct QemuSystemBuilder {
     kcov: QemuKcovMode,
 
     cpus: u8,
-    memory: u8,
+    memory: u16,  // Changed to u16 to support values up to 65535 MB
 
     with_audio: bool,
     with_nic: bool,
@@ -187,7 +187,7 @@ impl QemuSystemBuilder {
         self
     }
 
-    pub fn memory(mut self, gigabytes: u8) -> Self {
+    pub fn memory(mut self, gigabytes: u16) -> Self {
         self.memory = gigabytes;
         self
     }
@@ -230,6 +230,14 @@ impl QemuSystemBuilder {
     pub fn fake_cmd_complete(mut self) -> Self {
         assert_eq!(self.target_device.get_id(), 40, "Fake Cmd Complete is only usable with a Bluetooth device");
         self.bt_fake_cmd_complete = true;
+        self
+    }
+
+    pub fn add_raw_qemu_args(mut self, args: &str) -> Self {
+        // Split the args string and add each argument
+        for arg in args.split_whitespace() {
+            self.devices.push(arg.to_string());
+        }
         self
     }
 
@@ -315,9 +323,13 @@ impl StdQemuSystem {
         // Setup standards
         let mut args = vec![
             "-smp".to_string(),
-            builder.cpus.to_string(),
+            if builder.cpus > 1 {
+                format!("{},sockets={},cores=1", builder.cpus, builder.cpus)
+            } else {
+                builder.cpus.to_string()
+            },
             "-m".to_string(),
-            format!("{}G", builder.memory),
+            format!("{}M", builder.memory * 1024),  // Convert GB to MB
         ];
 
         let mut shmem = None;
@@ -370,7 +382,7 @@ impl StdQemuSystem {
 
         // Build kernel params
         let mut kernel_params: Vec<String> =
-            vec!["console=ttyS0 root=/dev/sda rw panic_on_warn".to_string()];
+            vec!["net.ifnames=0 console=ttyS0 root=/dev/sda rw rootfstype=ext4 panic_on_warn".to_string()];
 
         match builder.kcov {
             QemuKcovMode::None(_) => {}
@@ -500,7 +512,7 @@ impl StdQemuSystem {
             virtbt_conn.set_nonblocking(true).expect("Unable to set VirtIO connection to non-blocking, which is required to check for cmd complete events");
         }
 
-        Self {
+        let system = Self {
             args,
             id: builder.id,
             executable: builder.executable,
@@ -526,7 +538,17 @@ impl StdQemuSystem {
             only_ready_on_rx: builder.wait_for_frame,
             target_device: builder.target_device,
             fake_bt_cc: builder.bt_fake_cmd_complete
+        };
+
+        // For Bluetooth devices with init enabled, call init_fake_controller() with 
+        // extended timeout to wait for kernel boot and HCI commands from virtio_bt.
+        // The kernel sends HCI_OP_RESET during driver init (~17s after boot).
+        if builder.with_init && builder.bt_fake_cmd_complete {
+            info!("Waiting for Bluetooth HCI initialization (up to 60s for kernel boot)...");
+            system.init_fake_controller_with_boot_wait();
         }
+
+        system
     }
 
     pub fn get_virtio_id(&self) -> u8 {
@@ -642,6 +664,10 @@ impl StdQemuSystem {
 
     fn flush_dmesg(&mut self) {
         for line in self.dmesg_reader.by_ref() {
+            // Print dmesg line if QEMU logging is enabled or trace level is active
+            if self.logging || log_enabled!(log::Level::Debug) {
+                eprint!("{}", line);  // Print to stderr without additional formatting
+            }
             let crash = utils::is_crashlog(&line);
             if crash.is_crash() {
                 self.run_crashed = crash;
@@ -715,6 +741,74 @@ impl StdQemuSystem {
             }
 
             if rx_frame[1..=2] == final_code {
+                break;
+            }
+        }
+        self.virtbt_conn.set_read_timeout(None).unwrap();
+    }
+
+    /// Version of init_fake_controller that waits for kernel boot before expecting HCI commands.
+    /// Uses a longer timeout (60s) on first receive to allow for full kernel boot.
+    pub fn init_fake_controller_with_boot_wait(&self) {
+        if !self.use_fake_init {
+            return;
+        }
+
+        let mut responses: HashMap<[u8; 2], Vec<u8>> = HashMap::new();
+        let mut reader = Capture::from_file(&self.fake_init_pcap).expect("Can't open pcap file");
+
+        let mut cmd_opcode = [0_u8; 2];
+        while let Ok(packet) = reader.next_packet() {
+            // Command sent from host
+            if packet.data[3] == 0 {
+                cmd_opcode = [packet.data[5], packet.data[6]];
+            } else {
+                // Event sent from controller
+                responses.insert(cmd_opcode, packet.data[4..].to_vec());
+            }
+        }
+
+        let final_code = cmd_opcode;
+        let mut rx_frame = [0_u8; 256];
+        let mut first_frame = true;
+
+        loop {
+            // Use 60s timeout for first frame (kernel boot), 5s for subsequent frames
+            let timeout = if first_frame {
+                Duration::from_secs(60)
+            } else {
+                Duration::from_secs(5)
+            };
+            self.virtbt_conn.set_read_timeout(Some(timeout)).unwrap();
+            
+            let status = self.virtbt_conn.recv(&mut rx_frame);
+            if status.is_err() {
+                if first_frame {
+                    eprintln!("Controller Initialization: No HCI commands received during kernel boot (60s timeout)");
+                } else {
+                    eprintln!("Controller Initialization: Could not receive more host frames: {}", status.expect_err(""));
+                }
+                break;
+            }
+            first_frame = false;
+
+            info!("Received HCI command: opcode={:02x}{:02x}", rx_frame[2], rx_frame[1]);
+
+            if responses.contains_key(&rx_frame[1..=2]) {
+                let response = responses.get(&rx_frame[1..=2]).unwrap();
+                self.virtbt_conn.send(response).unwrap();
+                self.round_inputs.borrow_mut().push(response.clone());
+                info!("Sent HCI response for opcode {:02x}{:02x}", rx_frame[2], rx_frame[1]);
+            } else {
+                eprintln!(
+                    "\nError during initialization: Received unknown HCI Frame: {:?}",
+                    &rx_frame
+                );
+                break;
+            }
+
+            if rx_frame[1..=2] == final_code {
+                info!("Bluetooth controller initialization complete");
                 break;
             }
         }
@@ -814,6 +908,9 @@ impl StdQemuSystem {
             if crash.is_crash() {
                 self.run_crashed = crash.clone();
                 self.print_err_debug("VM is crashed while waiting to be ready");
+                // TEMP DEBUG: Wait longer to capture full crash stack trace
+                sleep(Duration::from_secs(5));
+                self.flush_dmesg();
                 self.current_exec_dmesg
                     .replace(self.dmesg_reader.get_read_lines()[0..].join(""));
                 if crash == Crashtype::Unrecoverable {
