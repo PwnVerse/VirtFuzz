@@ -131,6 +131,11 @@ struct Cli {
     /// Record the coverage to a file named <kernel-config.coverage>
     #[clap(long, action)]
     record_coverage: bool,
+    /// Override the coverage output path set by --record-coverage (which otherwise
+    /// derives a filename from --kernel's basename alone, colliding across concurrent
+    /// instances sharing a working directory and the same kernel image name)
+    #[clap(long, value_parser)]
+    coverage_output: Option<PathBuf>,
     /// Change the directory with initial inputs
     #[clap(long, action)]
     initial_inputs: Vec<PathBuf>,
@@ -623,10 +628,12 @@ where
 
         // AFL-like Map Observer & Feedback
         let coverage_file = if self.cli.record_coverage {
-            Some(PathBuf::from(format!(
-                "{}.coverage",
-                self.cli.kernel.file_name().unwrap().to_str().unwrap()
-            )))
+            Some(self.cli.coverage_output.clone().unwrap_or_else(|| {
+                PathBuf::from(format!(
+                    "{}.coverage",
+                    self.cli.kernel.file_name().unwrap().to_str().unwrap()
+                ))
+            }))
         } else {
             None
         };
