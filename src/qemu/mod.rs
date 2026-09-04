@@ -43,6 +43,10 @@ const DMESG_READ_TIMEOUT: Option<Duration> = None;
 /// Seconds to sleep after an input is sent to QEMU. Throttling it makes it actually faster, as a busy-wait blocks the VM from being scheduled
 const QEMU_WAIT_EXEC: Duration = Duration::from_millis(1);
 const QEMU_WAIT_READY: Duration = Duration::from_secs(1);
+// dmesg line for the last systemd unit the device's boot args pull in
+// (guestimage/permanent-scan.service, wanted by wifi-scan's device-definition
+// command_line_params). Marks the guest as actually idle, not just booted.
+const READY_TARGET_LINE: &str = "Started Permanently scan for WiFi";
 
 pub trait QemuSystem: Debug {
     fn is_ready(&mut self) -> Result<bool, QemuSystemError>;
@@ -281,6 +285,9 @@ pub struct StdQemuSystem {
     shmem: Option<Shmem>,
     kcov: QemuKcovMode,
     ready: SystemReadyState,
+    // set once the login banner is seen; gates the wait for READY_TARGET_LINE
+    // below (see is_ready_with_params) instead of a fixed-duration sleep
+    banner_seen: bool,
     only_ready_on_rx: bool,
     run_crashed: Crashtype,
 
@@ -531,6 +538,7 @@ impl StdQemuSystem {
                 QemuKcovMode::None(_) => SystemReadyState::CoverageReady,
                 _ => SystemReadyState::Initializing,
             },
+            banner_seen: false,
             kcov: builder.kcov,
             run_crashed: Crashtype::None,
             round_inputs: Rc::new(RefCell::new(Vec::new())),
@@ -940,23 +948,22 @@ impl StdQemuSystem {
                     }
                 }
                 SystemReadyState::CoverageReady => {
-                    if !self.only_ready_on_rx && line.contains(final_dmesg_line) {
+                    if !self.only_ready_on_rx && !self.banner_seen && line.contains(final_dmesg_line) {
                         #[cfg(feature = "introspection")]
                         {
                             let startup_duration = (Instant::now() - self.process_start).as_secs();
                             error!("startup_duration={startup_duration}");
                         }
                         self.init_fake_controller();
-                        // Login banner != quiescent: systemd is still starting
-                        // late multi-user units (permanent-scan.service, NM,
-                        // journal flush) for several more seconds. C3 inputs
-                        // must run to full completion (no early crash exit),
-                        // so sending them into this boot-tail storm burns
-                        // through max_tolerated_timeouts and forces an
-                        // immediate re-reset (measured: within 1s of ready in
-                        // half of observed boot cycles). Give the guest a
-                        // short settle window first.
-                        sleep(Duration::from_secs(5));
+                        self.banner_seen = true;
+                    }
+                    // Login banner != quiescent; wait for the last boot unit's
+                    // dmesg line instead of a fixed sleep (33/33 clean boots
+                    // had it before next reset, 0/9 early-death boots did).
+                    if !self.only_ready_on_rx
+                        && self.banner_seen
+                        && line.contains(READY_TARGET_LINE)
+                    {
                         self.ready = SystemReadyState::DeviceReady;
                         info!(
                             "Machine is ready after {}s",
@@ -1233,6 +1240,7 @@ impl QemuSystem for StdQemuSystem {
             QemuKcovMode::None(_) => SystemReadyState::CoverageReady,
             _ => SystemReadyState::Initializing,
         };
+        self.banner_seen = false;
         self.run_crashed = Crashtype::None;
 
         if self.fake_bt_cc {
