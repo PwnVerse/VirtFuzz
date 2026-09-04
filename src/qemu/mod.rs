@@ -947,6 +947,16 @@ impl StdQemuSystem {
                             error!("startup_duration={startup_duration}");
                         }
                         self.init_fake_controller();
+                        // Login banner != quiescent: systemd is still starting
+                        // late multi-user units (permanent-scan.service, NM,
+                        // journal flush) for several more seconds. C3 inputs
+                        // must run to full completion (no early crash exit),
+                        // so sending them into this boot-tail storm burns
+                        // through max_tolerated_timeouts and forces an
+                        // immediate re-reset (measured: within 1s of ready in
+                        // half of observed boot cycles). Give the guest a
+                        // short settle window first.
+                        sleep(Duration::from_secs(5));
                         self.ready = SystemReadyState::DeviceReady;
                         info!(
                             "Machine is ready after {}s",

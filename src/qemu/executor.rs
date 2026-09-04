@@ -337,7 +337,10 @@ where
             #[cfg(feature = "introspection")]
             stats: QemuExecutorStats::new(name.into()),
             timeouts: 0,
-            max_tolerated_timeouts: 0
+            // was 0: any single >100ms input forced a full VM reset, which
+            // starves C3 (never crashes, so every input pays real exec time)
+            // far worse than C1 (crash short-circuits most inputs fast)
+            max_tolerated_timeouts: 3
         }
     }
 }
