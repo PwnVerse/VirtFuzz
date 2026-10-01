@@ -1060,6 +1060,9 @@ impl QemuSystem for StdQemuSystem {
                 Ok(_) => {}
                 Err(err) => return Err(err),
             }
+            if self.process_start.elapsed().as_secs() > 180 {
+                return Err(QemuSystemError::NotReady);
+            }
             sleep(QEMU_WAIT_READY);
         }
     }
