@@ -1,0 +1,11 @@
+[Unit]
+Description=Permanently scan for WiFi
+After=ibss.service hostapd.service setup-syzkaller.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
