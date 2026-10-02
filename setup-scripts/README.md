@@ -110,6 +110,87 @@ Per-device completion lines:
    * no repeated `Error while waiting for VM: NotReady` in `fuzzer_output.log`;
    * heartbeats (`(GLOBAL) run time`) resume and executions grow.
 
+## Campaign launcher (reference copy)
+
+`rerun_20260929/` mirrors the launcher used for the seeded 72 h grid, so future
+waves do not depend on `/home/ritvik/virtfuzz_rerun_20260929` alone:
+
+* `ssh_comm_seeded.py` — wrapper used by all running trials. It derives each
+  trial's deadline from `<workdir>/.trial_start` (restarts run only the
+  remaining time), keeps `pc_first_seen.json`/coverage/corpus across restarts,
+  and on restart imports the trial's non-hidden corpus inputs via
+  `--initial-inputs`.
+* `ssh_comm_rerun.py` — unseeded predecessor used by `launch_one.sh`.
+* `launch_one_mode.sh <mode> <trial> <device> <cores> <duration>` — per-trial
+  `systemd-run` launcher for all devices; `launch_one_seeded.sh` is the older
+  wifi-scan-only variant.
+* `prepare_image.sh <mode> <trial>` / `prepare_main.sh` — per-trial image +
+  corpus creation (scan variant; use `prep_grid.sh` for the 4-device grid).
+* `launch_main.sh`, `register_trials.sh` — wave launcher and registry update.
+* `RUNBOOK.md` — the 2026-09-29 audit: paper-vs-local differences, CPU-lane and
+  port allocation, launch/validation gates.
+
+Paths inside the scripts default to `/evaldisk/chaos_eval/VirtFuzz` and
+`/home/ritvik/virtfuzz_rerun_20260929`; `launch_one_mode.sh` reads
+`VIRTFUZZ_INITIAL_INPUTS`, and `rollout_remaining.sh` (above) accepts `VF`,
+`WRAP`, `PY`, `MARKER` overrides.
+
+## Reproduce one trial per VirtFuzz mode
+
+All commands run from the repo root; `VF=/evaldisk/chaos_eval/VirtFuzz`.
+
+Prerequisites (once):
+```
+cargo build --release -p virtfuzz-fuzz            # fuzzer binary
+(cd linux && ./make_clang.sh clang fuzz)          # annotated kernel, KCOV/KASAN
+setup-scripts/setup-qemu.sh                       # patched QEMU 8.2.2
+```
+Base images `guestimage/stretch_c2.img` / `stretch_c3.img` must be probe-injected
+(Debian 9.13; `/etc/init.d/chaos_probe` carrying `--mode=c2|c3` and
+`STABILIZE=0`; `chaos_probe.service` enabled). `prepare_image.sh` asserts all of
+this; the injector is `/evaldisk/chaos_eval/setup_chaos_probe.sh` together with
+`chaos_probe` + `chaos_probe.sh`.
+
+| mode | device definition | device flags | image unit | completion line | seeds |
+|---|---|---|---|---|---|
+| wifi-scan | hwsim-scan.json | `--use-hwsim-input` | permanent-scan.service | `Started Permanently scan for WiFi` | seeds_80211_final |
+| wifi-ibss | hwsim-ibss.json | `--use-hwsim-input` | ibss.service | `Started Activate IBSS` | seeds_80211_final |
+| wifi-ap | hwsim-ap.json | `--use-hwsim-input` | hostapd.service | `Started Hostapd IEEE 802.11 AP` | seeds_80211_final |
+| wifi-syzkaller | hwsim-syzkaller.json | `--use-hwsim-input` | setup-syzkaller.service | `SYZKALLER SETUP FINISHED` | seeds_80211_final_syzkaller |
+| bluetooth-scan | bluetooth.json | `--bt-fake-cc --wait-for-rx --init-path resources/setup.pcap` | none (RX readiness) | first HWSIM RX frame | seeds_bt_empty |
+
+Image prep for policy `<pol>` (c2/c3), trial `<N>`, device `<dev>`; broker port
+is `16000+<N>*100` (c2) or `20000+<N>*100` (c3), plus 20 for bluetooth-scan:
+```
+IMG=guestimage/stretch_<pol>_<dev>_trial<N>.img
+cp --sparse=always --reflink=auto guestimage/stretch_<pol>.img "$IMG"
+# enable the mode's unit, e.g. wifi-ibss:
+debugfs -w -R 'symlink /etc/systemd/system/multi-user.target.wants/ibss.service ../ibss.service' "$IMG"
+# non-scan wifi modes also get the ready-marker (skip for wifi-scan/bluetooth):
+debugfs -w -R "write setup-scripts/ready-marker.service /etc/systemd/system/ready-marker.service" "$IMG"
+debugfs -w -R 'symlink /etc/systemd/system/multi-user.target.wants/ready-marker.service ../ready-marker.service' "$IMG"
+# wifi-ap additionally installs setup-scripts/hostapd.service as hostapd.service
+mkdir -p rerun_20260929/corpus_<pol>_trial<N>
+```
+(`setup-scripts/prep_grid.sh` does all of this for a whole grid; edit `SPECS`.)
+
+Launch (4 exclusive logical CPUs = 2 physical cores incl. SMT siblings):
+```
+VIRTFUZZ_INITIAL_INPUTS=$VF/<seeds from table> \
+  setup-scripts/rerun_20260929/launch_one_mode.sh <pol> <N> <device> <cpus> 259200
+```
+This creates `virtfuzz-seeded-<device>-<pol>-trial<N>.service` with
+`Restart=on-failure`, memory caps and `RuntimeMaxSec=duration+1h`, and records
+`workdir_<pol>_<dev>_trial<N>/.trial_start` used for remaining-time restarts.
+
+Verify after launch/restart:
+* unit active, `.trial_start` unchanged, expected remaining time;
+* guest cmdline has `mac80211_hwsim.radios=*` and `systemd.wants=<image unit>`
+  (from the device JSON `command_line_params`);
+* in `fuzzer_output.log`, each boot reaches the completion line before fuzzing
+  and does not repeat `Error while waiting for VM: NotReady`;
+* heartbeats (`(GLOBAL) run time`) and executions grow.
+
 ## Notes / gotchas
 
 * Console `[ OK ]` lines in `fuzzer_output.log` can be dropped under load; do
