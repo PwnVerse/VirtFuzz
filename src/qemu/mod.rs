@@ -288,6 +288,9 @@ pub struct StdQemuSystem {
     // set once the login banner is seen; gates the wait for READY_TARGET_LINE
     // below (see is_ready_with_params) instead of a fixed-duration sleep
     banner_seen: bool,
+    // set once the device-specific boot unit's dmesg line is seen; readiness
+    // needs both flags so their order in the boot log does not matter
+    marker_seen: bool,
     only_ready_on_rx: bool,
     run_crashed: Crashtype,
 
@@ -539,6 +542,7 @@ impl StdQemuSystem {
                 _ => SystemReadyState::Initializing,
             },
             banner_seen: false,
+            marker_seen: false,
             kcov: builder.kcov,
             run_crashed: Crashtype::None,
             round_inputs: Rc::new(RefCell::new(Vec::new())),
@@ -957,13 +961,20 @@ impl StdQemuSystem {
                         self.init_fake_controller();
                         self.banner_seen = true;
                     }
-                    // Login banner != quiescent; wait for the last boot unit's
-                    // dmesg line instead of a fixed sleep (33/33 clean boots
-                    // had it before next reset, 0/9 early-death boots did).
-                    if !self.only_ready_on_rx
-                        && self.banner_seen
-                        && line.contains(READY_TARGET_LINE)
-                    {
+                    // Login banner != quiescent; wait for the device's own boot
+                    // unit to finish. The marker is derived from the device's
+                    // kernel command line (DeviceConfiguration::ready_marker);
+                    // the old hardcoded wifi-scan line silently broke every
+                    // other device. Track both signals independently so their
+                    // order in the boot log does not matter.
+                    let ready_marker = self
+                        .target_device
+                        .ready_marker()
+                        .unwrap_or(READY_TARGET_LINE);
+                    if !self.only_ready_on_rx && line.contains(ready_marker) {
+                        self.marker_seen = true;
+                    }
+                    if !self.only_ready_on_rx && self.banner_seen && self.marker_seen {
                         self.ready = SystemReadyState::DeviceReady;
                         info!(
                             "Machine is ready after {}s",
@@ -1244,6 +1255,7 @@ impl QemuSystem for StdQemuSystem {
             _ => SystemReadyState::Initializing,
         };
         self.banner_seen = false;
+        self.marker_seen = false;
         self.run_crashed = Crashtype::None;
 
         if self.fake_bt_cc {

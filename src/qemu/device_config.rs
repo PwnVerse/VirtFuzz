@@ -247,6 +247,30 @@ impl DeviceConfiguration {
         self.virtio_id
     }
 
+    /// Dmesg line that marks the guest as fully booted for this device: the
+    /// systemd unit pulled in via `systemd.wants=` in the command line finishes
+    /// its setup last. The fuzzer must not send inputs before this line (see
+    /// StdQemuSystem::is_ready_with_params); the previous hardcoded wifi-scan
+    /// line made every other mode depend on fake marker units.
+    pub fn ready_marker(&self) -> Option<&'static str> {
+        let params = self.command_line_params.as_ref()?;
+        for p in params {
+            if p.contains("systemd.wants=permanent-scan.service") {
+                return Some("Started Permanently scan for WiFi");
+            }
+            if p.contains("systemd.wants=ibss.service") {
+                return Some("Started Activate IBSS");
+            }
+            if p.contains("systemd.wants=hostapd.service") {
+                return Some("Started Hostapd IEEE 802.11 AP");
+            }
+            if p.contains("systemd.wants=setup-syzkaller.service") {
+                return Some("SYZKALLER SETUP FINISHED");
+            }
+        }
+        None
+    }
+
     pub fn get_kernel_params(&self) -> Vec<String> {
         let mut params = self.command_line_params.clone().unwrap_or(vec![]);
 
